@@ -1,0 +1,31 @@
+SET PATH=D:\Keil5\ARM\ARMCC\Bin;D:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;D:\Program Files\nodejs\;D:\Program Files\Git\cmd;C:\Program Files\dotnet\;C:\Program Files (x86)\National Instruments\Shared\LabVIEW CLI;D:\Program Files\MATLAB\R2015b\runtime\win64;D:\Program Files\MATLAB\R2015b\bin;D:\Program Files\MATLAB\R2015b\polyspace\bin;C:\Program Files (x86)\IVI Foundation\IVI\Bin\;C:\Program Files\IVI Foundation\IVI\Bin\;C:\Program Files (x86)\IVI Foundation\VISA\WinNT\Bin;C:\Program Files\IVI Foundation\VISA\Win64\Bin\;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files (x86)\IVI Foundation\VISA\WinNT\Bin\;C:\Program Files (x86)\STMicroelectronics\STM32 ST-LINK Utility\ST-LINK Utility;C:\Users\mgz\AppData\Local\Programs\PHP\current;C:\Users\mgz\AppData\Local\Programs\Microsoft\jdk-17.0.18.8-hotspot\bin;C:\Users\mgz\AppData\Local\Microsoft\WindowsApps;C:\Users\mgz\AppData\Roaming\npm;D:\Program Files\Wireshark;C:\Users\mgz\AppData\Local\Python\bin;D:\Program Files (x86)\Nmap;D:\Program Files\JetBrains\PyCharm 2026.1.1\bin;C:\Users\mgz\AppData\Local\Programs\Microsoft VS Code\bin;D:\Program Files\JetBrains\PhpStorm 2026.1.1\bin
+SET CPU_TYPE=STM32F103C8
+SET CPU_VENDOR=STMicroelectronics
+SET UV2_TARGET=ADC-DEMO
+SET CPU_CLOCK=0x007A1200
+"D:\Keil5\ARM\ARMCC\Bin\ArmAsm" --Via ".\startup_stm32f10x_md._ia"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\main.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\led.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\usart1.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\delay.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\dht11.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\sys.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_it.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\oled.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\esp8266.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\ds1302.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\mqtt.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_gpio.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_rcc.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_usart.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_adc.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_dma.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_flash.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_rtc.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\misc.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_tim.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\stm32f10x_exti.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\core_cm3.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmCC" --Via ".\system_stm32f10x.__i"
+"D:\Keil5\ARM\ARMCC\Bin\ArmLink" --Via ".\STM32-DEMO.lnp"
+"D:\Keil5\ARM\ARMCC\Bin\fromelf.exe" ".\STM32-DEMO.axf" --i32combined --output ".\STM32-DEMO.hex"

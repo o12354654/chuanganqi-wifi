@@ -1,0 +1,14 @@
+.\ds1302.o: ds1302.c
+.\ds1302.o: ds1302.h
+.\ds1302.o: ..\CMSIS\stm32f10x.h
+.\ds1302.o: ..\CMSIS\core_cm3.h
+.\ds1302.o: D:\Keil5\ARM\ARMCC\Bin\..\include\stdint.h
+.\ds1302.o: ..\CMSIS\system_stm32f10x.h
+.\ds1302.o: ..\USER\stm32f10x_conf.h
+.\ds1302.o: ..\FWlib\inc\stm32f10x_adc.h
+.\ds1302.o: ..\CMSIS\stm32f10x.h
+.\ds1302.o: ..\FWlib\inc\stm32f10x_dma.h
+.\ds1302.o: ..\FWlib\inc\stm32f10x_flash.h
+.\ds1302.o: ..\FWlib\inc\stm32f10x_gpio.h
+.\ds1302.o: ..\FWlib\inc\stm32f10x_rcc.h
+.\ds1302.o: ..\FWlib\inc\stm32f10x_usart.h
