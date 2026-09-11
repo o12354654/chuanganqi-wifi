@@ -1,0 +1,63 @@
+# ============================================================
+# Keil MDK / STM32 工程 .gitignore
+# 原则：只留"人写的东西"（源码 + 工程文件），编译产物全部不入库
+# 想恢复某个类别：删掉对应行，再 git add -f 那个文件即可
+# ============================================================
+
+# ---------- 编译中间产物 ----------
+*.o
+*.crf
+*.d
+*.dep
+*.lnp
+*.axf
+*.elf
+*.bin
+*.__i
+*._ia
+*.iex
+*.sct
+*.scr
+*.plg
+*.gbw
+*.gpd
+*.gup
+*.jobs
+
+# ---------- 编译输出目录 / 报告 ----------
+Listing/
+build/
+DebugConfig/*.bak
+*.htm
+*.map
+*.lst
+*.build_log.htm
+
+# ---------- 固件文件（能重新编译出来，默认不入库）----------
+# 想把这个 hex 传上去让别人直接烧，就删掉下面两行
+*.hex
+*.sct
+
+# ---------- Keil 自动生成 ----------
+RTE/
+USER/ADC-DEMO.BAT
+USER/STM32-DEMO_ADC-DEMO.dep
+
+# ---------- Keil 界面/备份文件（每个人不一样，属于本机状态）----------
+*.uvguix.*
+*.uvgui.*
+*.uvopt.bak
+*.uvproj.bak
+*.saved_uv4
+STM32-DEMO.uvopt
+USER/esp8266.s
+
+# ---------- 调试器本机设置 ----------
+JLinkSettings.ini
+
+# ---------- 编辑器 / 系统垃圾 ----------
+# 想把自己 VSCode 的构建任务也传上去，就删掉下面这行
+.vscode/
+*.log
+Thumbs.db
+desktop.ini

@@ -29,5 +29,6 @@ typedef struct
 void DS1302_Init(void);
 void DS1302_SetTime(DS1302_TIME *time);
 void DS1302_GetTime(DS1302_TIME *time);
+uint8_t DS1302_IsHalt(void);
 
 #endif

@@ -1,6 +1,0 @@
---cpu Cortex-M3 -g --apcs=interwork --pd "__MICROLIB SETA 1"
--I.\RTE\_ADC-DEMO
--ID:\Keil5\packs\ARM\CMSIS\5.9.0\CMSIS\Core\Include
--ID:\Keil5\packs\Keil\STM32F1xx_DFP\2.4.1\Device\Include
---pd "__UVISION_VERSION SETA 539" --pd "_RTE_ SETA 1" --pd "STM32F10X_MD SETA 1" --pd "_RTE_ SETA 1"
---list ..\listing\esp8266.lst --xref -o .\esp8266.o ".\esp8266.s"

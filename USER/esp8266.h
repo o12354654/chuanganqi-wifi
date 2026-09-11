@@ -29,6 +29,19 @@
 #define TICK_MQTT_PING         1500
 #define TICK_CIPCLOSE_WAIT      25
 
+/* ===== 网络授时（时间同步）===== */
+#define TIME_NTP_SERVER    "ntp.aliyun.com"        /* 第 1 层：SNTP 授时 */
+#define TIME_NTP_TZ        8                       /* 时区：东八区 */
+#define TIME_HTTP_HOST     "acs.m.taobao.com"      /* 第 2 层：HTTP 响应头里的 Date */
+#define TIME_HTTP_PORT     80
+#define TIME_HTTP_PATH     "/gw/mtop.common.getTimestamp/"
+
+#define TICK_SNTP_FIRST_WAIT   150   /* ~3s  等 SNTP 完成首次同步 */
+#define TICK_SNTP_QUERY_GAP    100   /* ~2s  两次查询的间隔 */
+#define SNTP_MAX_TRY           3     /* 最多问 3 次 */
+#define TICK_TIME_HTTP_WAIT    300   /* ~6s  HTTP 授时总超时 */
+#define TICK_SNTP_PROBE_WAIT   150   /* ~3s  MQTT 在线时周期性校时的等待 */
+
 typedef enum {
     ESP_STATE_INIT,
     ESP_STATE_WAIT_AT,
@@ -37,6 +50,11 @@ typedef enum {
     ESP_STATE_CONNECTED,
     ESP_STATE_CHECK,
     ESP_STATE_WAIT_RECONNECT,
+    ESP_STATE_TIME_SNTP_CFG,
+    ESP_STATE_TIME_SNTP_GET,
+    ESP_STATE_TIME_HTTP_CONN,
+    ESP_STATE_TIME_HTTP_GET,
+    ESP_STATE_TIME_DONE,
     ESP_STATE_TCP_START,
     ESP_STATE_TCP_WAIT,
     ESP_STATE_TCP_SEND_CONNECT,

@@ -87,6 +87,7 @@ u8 DHT11_Read_Data(u8 *temp, u8 *humi)
             *humi = buf[0];
             *temp = buf[2];
         }
+        else return 1;   /* 校验和不对：返回错误，让调用方知道这次数据无效 */
     }
     else return 1;
     return 0;

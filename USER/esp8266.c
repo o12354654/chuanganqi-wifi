@@ -5,9 +5,15 @@
  *
  * 状态流转：
  *   INIT → AT → CWMODE → CWJAP → CONNECTED
+ *     → TIME_SNTP_CFG → TIME_SNTP_GET      （网络授时第 1 层：SNTP）
+ *     → TIME_HTTP_CONN → TIME_HTTP_GET     （第 1 层不行才走，第 2 层：HTTP 的 Date 头）
+ *     → TIME_DONE
  *     → TCP_START → TCP_WAIT → SEND_CONNECT → WAIT_CONNACK → MQTT_ONLINE
  *     ↓ 断连/失败
  *   TCP_DISCONNECT → TCP_START（重试） / WAIT_RECONNECT（WiFi断了）
+ *
+ * 【授时策略】联网优先用网络时间，拿到就写回 DS1302；
+ *   两层都拿不到 → 继续用 DS1302 走时，60s 后再试，全程不阻塞主循环。
  *
  * 【透传】USART1 输入 +++ 进入，--- 退出
  */
@@ -17,6 +23,8 @@
 #include "delay.h"
 #include "usart1.h"
 #include "misc.h"
+#include "clock.h"
+#include "timeparse.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -38,20 +46,33 @@ static uint8_t        wifi_connected  = 0;
 static uint8_t        mqtt_online     = 0;
 static uint32_t       mqtt_timer      = 0;   // MQTT 在线计时
 
+/* ===================== 授时变量 ===================== */
+static uint8_t  sntp_try              = 0;   /* SNTP 已问过几次 */
+static uint8_t  sntp_sent             = 0;   /* 本次查询已发出 */
+static uint8_t  sntp_supported        = 1;   /* 这版 AT 固件是否支持 SNTP */
+static uint8_t  probe_on              = 0;   /* MQTT 在线时的周期性校时 */
+static uint16_t probe_timer           = 0;
+static uint8_t  close_sent            = 0;   /* CIPCLOSE 只发一次 */
+static ESP8266_State last_state       = ESP_STATE_INIT;  /* 防卡死保底用 */
+
 /* ===================== 透传变量 ===================== */
 static uint8_t  transparent_mode      = 0;
 static uint8_t  plus_count            = 0;
 static uint16_t plus_timer            = 0;
 
 /* ===================== DHT11 数据（外部引用） ===================== */
-extern volatile u8 temp;
-extern volatile u8 humi;
+extern u8 temp;
+extern u8 humi;
 
 /* ===================== 内部函数声明 ===================== */
 static void   ESP8266_USART2_Init(uint32_t baud);
 static void   ESP8266_SendCmd(const char *cmd);
 static void   ESP8266_ClearRx(void);
 static uint8_t ESP8266_RxHas(const char *str);
+static char  *ESP8266_RxStr(void);
+static void   ESP8266_RxSlide(void);
+static void   ESP8266_TimeSyncStart(void);
+static void   ESP8266_TimeSyncHttp(void);
 static void   ESP8266_TransparentLoop(void);
 static void   ESP8266_TransparentEnter(void);
 static void   ESP8266_TransparentExit(void);
@@ -130,7 +151,7 @@ static void ESP8266_ClearRx(void)
     memset(rx_buf, 0, RX_BUF_SIZE);
 }
 
-/* ===================== 缓冲含字符串？ ===================== */
+/* ===================== 缓冲加字符串尾巴 ===================== */
 static uint8_t ESP8266_RxHas(const char *str)
 {
     if (rx_len < RX_BUF_SIZE) {
@@ -139,6 +160,38 @@ static uint8_t ESP8266_RxHas(const char *str)
         rx_buf[RX_BUF_SIZE - 1] = '\0';
     }
     return (strstr(rx_buf, str) != NULL);
+}
+
+/* 缓冲补 '\0' 后返回，供解析函数使用 */
+static char *ESP8266_RxStr(void)
+{
+    if (rx_len < RX_BUF_SIZE) {
+        rx_buf[rx_len] = '\0';
+    } else {
+        rx_buf[RX_BUF_SIZE - 1] = '\0';
+    }
+    return rx_buf;
+}
+
+/**
+ * @brief  缓冲快满时把尾部挪到前面
+ * @note   HTTP 响应头动辄几百字节，512 的缓冲一满后面就再也收不进来，
+ *         解析 Date 之前先滑一次窗口。挪动期间关 RXNE 中断防止踩踏。
+ */
+static void ESP8266_RxSlide(void)
+{
+    uint16_t keep = 160;
+    uint16_t i;
+
+    if (rx_len < RX_BUF_SIZE - 32) return;   /* 还没满，不用滑 */
+
+    USART_ITConfig(USART2, USART_IT_RXNE, DISABLE);
+    for (i = 0; i < keep; i++) {
+        rx_buf[i] = rx_buf[rx_len - keep + i];
+    }
+    rx_len      = keep;
+    last_rx_len = keep;
+    USART_ITConfig(USART2, USART_IT_RXNE, ENABLE);
 }
 
 /* ===================== 解析 +IPD,<len>:<data> ===================== */
@@ -179,16 +232,17 @@ static uint8_t ESP8266_TCPSend(uint8_t *data, uint16_t len)
     sprintf(cmd, "AT+CIPSEND=%d\r\n", len);
     ESP8266_SendCmd(cmd);
 
-    /* 等待 ">" 提示符 */
+    /* 等 ">" 提示符：这个循环是阻塞的，上限调小一点，
+       ESP 正常几毫秒就回，2e6 次 @72MHz 万一不应答会拖住主循环好几秒 */
     timeout = 0;
-    while (!ESP8266_RxHas(">") && timeout < 2000000) {
+    while (!ESP8266_RxHas(">") && timeout < 200000) {
         if (ESP8266_RxHas("ERROR") || ESP8266_RxHas("busy")) {
             printf("ESP8266: TCPSend rejected (%d)\r\n", len);
             return 1;
         }
         timeout++;
     }
-    if (timeout >= 2000000) {
+    if (timeout >= 200000) {
         printf("ESP8266: TCPSend timeout, len=%d\r\n", len);
         /* 打印缓冲区内容帮助诊断 */
         rx_buf[rx_len] = '\0';
@@ -213,7 +267,7 @@ static void ESP8266_TransparentEnter(void)
     transparent_mode = 1;
     USART_ITConfig(USART2, USART_IT_RXNE, DISABLE);
     printf("\r\n========================================\r\n");
-    printf("  透传模式 | 输入 --- 退出\r\n");
+    printf("  transparent mode | type --- to exit\r\n");
     printf("========================================\r\n");
 }
 
@@ -226,9 +280,12 @@ static void ESP8266_TransparentExit(void)
     ESP8266_ClearRx();
     esp_state   = ESP_STATE_INIT;
     state_timer = 0;
+    last_state  = ESP_STATE_INIT;
+    close_sent  = 0;
+    probe_on    = 0;
     mqtt_online = 0;
     mqtt_timer  = 0;
-    printf("\r\n=== 透传已退出 ===\r\n");
+    printf("\r\n=== transparent mode exited ===\r\n");
 }
 
 /* ===================== 透传阻塞循环 ===================== */
@@ -255,6 +312,34 @@ static void ESP8266_TransparentLoop(void)
     }
 }
 
+/* ===================== 授时：第 1 层 SNTP ===================== */
+static void ESP8266_TimeSyncStart(void)
+{
+    sntp_try   = 0;
+    sntp_sent  = 0;
+    close_sent = 0;
+    ESP8266_ClearRx();
+    printf("ESP8266: net time sync (1/2 SNTP)\r\n");
+    ESP8266_SendCmd("AT+CIPSNTPCFG=1," "8" ",\"" TIME_NTP_SERVER "\"\r\n");
+    esp_state   = ESP_STATE_TIME_SNTP_CFG;
+    state_timer = 0;
+}
+
+/* ===================== 授时：第 2 层 HTTP Date ===================== */
+static void ESP8266_TimeSyncHttp(void)
+{
+    char cmd[64];
+
+    sntp_supported = 0;      /* 这版固件没有 SNTP，本次连接内不再试 */
+    close_sent     = 0;
+    ESP8266_ClearRx();
+    printf("ESP8266: net time sync (2/2 HTTP Date)\r\n");
+    sprintf(cmd, "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n", TIME_HTTP_HOST, TIME_HTTP_PORT);
+    ESP8266_SendCmd(cmd);
+    esp_state   = ESP_STATE_TIME_HTTP_CONN;
+    state_timer = 0;
+}
+
 /* ===================== 初始化 ===================== */
 void ESP8266_Init(void)
 {
@@ -269,9 +354,16 @@ void ESP8266_Init(void)
     transparent_mode = 0;
     plus_count      = 0;
     plus_timer      = 0;
+    sntp_try        = 0;
+    sntp_sent       = 0;
+    sntp_supported  = 1;
+    probe_on        = 0;
+    probe_timer     = 0;
+    close_sent      = 0;
+    last_state      = ESP_STATE_INIT;
 
     printf("ESP8266: USART2 init OK (%d baud)\r\n", WIFI_BAUDRATE);
-    printf("ESP8266: +++ 透传 | WiFi=%s\r\n", WIFI_SSID);
+    printf("ESP8266: transparent mode=+++ / --- , WiFi=%s\r\n", WIFI_SSID);
 }
 
 /* ===================== 查询接口 ===================== */
@@ -288,6 +380,15 @@ void ESP8266_Process(void)
     uint8_t  onenet_data[128];  /* JSON 最长 ~88 字节 */
     int      slen;
     char     tmp[96];
+
+    /* ===== WiFi 掉线监听（模块会主动推 WIFI DISCONNECT，不必等 TCP 出错）===== */
+    if (ESP8266_RxHas("WIFI DISCONNECT")) {
+        if (wifi_connected) {
+            printf("ESP8266: WiFi lost (WIFI DISCONNECT)\r\n");
+        }
+        wifi_connected = 0;      /* 清标志：后面 TCP 连不上会自动退回 WAIT_RECONNECT 重连 AP */
+        ESP8266_ClearRx();
+    }
 
     /* ===== 透传入口检测 ===== */
     if (!transparent_mode) {
@@ -360,10 +461,17 @@ void ESP8266_Process(void)
             printf("ESP8266: WiFi Connected!\r\n");
             wifi_connected = 1;
             state_timer = 0;
+            sntp_supported = 1;
             ESP8266_ClearRx();
-            /* 先设置单连接模式，再发起 TCP */
-            ESP8266_SendCmd("AT+CIPMUX=0\r\n");
-            esp_state = ESP_STATE_TCP_START;
+            /* 刚联网：先抢网络时间（拿不到会退回 DS1302），再进 MQTT */
+            if (Clock_NetSyncDue()) {
+                Clock_NetSyncTry();
+                ESP8266_TimeSyncStart();
+            } else {
+                /* 先设置单连接模式，再发起 TCP */
+                ESP8266_SendCmd("AT+CIPMUX=0\r\n");
+                esp_state = ESP_STATE_TCP_START;
+            }
         } else if (ESP8266_RxHas("FAIL") || ESP8266_RxHas("ERROR")) {
             printf("ESP8266: WiFi FAIL\r\n");
             wifi_connected = 0;
@@ -410,6 +518,144 @@ void ESP8266_Process(void)
             ESP8266_ClearRx();
             ESP8266_SendCmd("AT+CWJAP=\"" WIFI_SSID "\",\"" WIFI_PASSWORD "\"\r\n");
             esp_state = ESP_STATE_WAIT_CWJAP;
+        }
+        break;
+
+    /* ============================================= */
+    /*                 网络授时状态                   */
+    /* ============================================= */
+
+    /* ---- SNTP 配置 ---- */
+    case ESP_STATE_TIME_SNTP_CFG:
+        if (ESP8266_RxHas("OK")) {
+            ESP8266_ClearRx();
+            state_timer = 0;
+            sntp_sent   = 0;
+            printf("ESP8266: SNTP cfg OK, wait first sync\r\n");
+            esp_state   = ESP_STATE_TIME_SNTP_GET;
+        } else if (ESP8266_RxHas("ERROR") || state_timer >= TICK_SNTP_FIRST_WAIT) {
+            printf("ESP8266: SNTP not supported\r\n");
+            ESP8266_TimeSyncHttp();
+        }
+        break;
+
+    /* ---- 查询 SNTP 时间 ---- */
+    case ESP_STATE_TIME_SNTP_GET:
+        if (!sntp_sent) {
+            /* 刚配好 SNTP，给它 TICK_SNTP_FIRST_WAIT 时间做首次同步再问 */
+            if (state_timer >= TICK_SNTP_FIRST_WAIT) {
+                ESP8266_ClearRx();
+                ESP8266_SendCmd("AT+CIPSNTPTIME?\r\n");
+                sntp_sent   = 1;
+                sntp_try++;
+                state_timer = 0;
+            }
+            break;
+        }
+
+        if (ESP8266_RxHas("+CIPSNTPTIME:")) {
+            DS1302_TIME nt;
+            if (TimeParse_SntpTime(ESP8266_RxStr(), &nt)) {
+                ESP8266_ClearRx();
+                Clock_NetSyncOk(&nt);
+                probe_on    = 0;
+                state_timer = 0;
+                esp_state   = ESP_STATE_TIME_DONE;
+                break;
+            }
+            printf("ESP8266: SNTP time not ready\r\n");
+            ESP8266_ClearRx();
+        }
+
+        if (state_timer >= TICK_SNTP_QUERY_GAP) {
+            if (sntp_try >= SNTP_MAX_TRY) {
+                printf("ESP8266: SNTP timeout\r\n");
+                ESP8266_TimeSyncHttp();
+            } else {
+                ESP8266_ClearRx();
+                ESP8266_SendCmd("AT+CIPSNTPTIME?\r\n");
+                sntp_try++;
+                state_timer = 0;
+            }
+        }
+        break;
+
+    /* ---- HTTP 授时：建立临时 TCP ---- */
+    case ESP_STATE_TIME_HTTP_CONN:
+        if (ESP8266_RxHas("CONNECT") && ESP8266_RxHas("OK")) {
+            char req[192];
+            int  n;
+
+            ESP8266_ClearRx();
+            n = sprintf(req,
+                        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: ESP8266\r\nConnection: close\r\n\r\n",
+                        TIME_HTTP_PATH, TIME_HTTP_HOST);
+            printf("ESP8266: time GET %d bytes\r\n", n);
+            if (ESP8266_TCPSend((uint8_t *)req, (uint16_t)n) == 0) {
+                state_timer = 0;
+                esp_state   = ESP_STATE_TIME_HTTP_GET;
+            } else {
+                printf("ESP8266: time GET send fail\r\n");
+                Clock_NetSyncFail();
+                state_timer = 0;
+                esp_state   = ESP_STATE_TIME_DONE;
+            }
+        } else if (ESP8266_RxHas("ERROR") || ESP8266_RxHas("CLOSED") ||
+                   ESP8266_RxHas("DNS Fail") || state_timer >= TICK_TCP_TIMEOUT) {
+            printf("ESP8266: time HTTP connect fail\r\n");
+            Clock_NetSyncFail();
+            ESP8266_ClearRx();
+            state_timer = 0;
+            esp_state   = ESP_STATE_TIME_DONE;
+        }
+        break;
+
+    /* ---- HTTP 授时：等响应头里的 Date（服务器时间，GMT） ---- */
+    case ESP_STATE_TIME_HTTP_GET:
+    {
+        char *p;
+
+        ESP8266_RxSlide();                 /* 响应头可能几百字节，先滑窗口 */
+        p = strstr(ESP8266_RxStr(), "Date: ");
+        if (p) {
+            DS1302_TIME nt;
+            if (TimeParse_HttpDate(p, &nt)) {
+                ESP8266_ClearRx();
+                Clock_NetSyncOk(&nt);
+                state_timer = 0;
+                esp_state   = ESP_STATE_TIME_DONE;
+                break;
+            }
+            printf("ESP8266: HTTP Date parse fail\r\n");
+            ESP8266_ClearRx();
+        }
+
+        if (ESP8266_RxHas("CLOSED") || state_timer >= TICK_TIME_HTTP_WAIT) {
+            printf("ESP8266: time HTTP timeout\r\n");
+            Clock_NetSyncFail();
+            ESP8266_ClearRx();
+            state_timer = 0;
+            esp_state   = ESP_STATE_TIME_DONE;
+        }
+        break;
+    }
+
+    /* ---- 授时收尾：关掉临时 TCP，回 MQTT 流程 ---- */
+    case ESP_STATE_TIME_DONE:
+        if (!close_sent) {
+            ESP8266_SendCmd("AT+CIPCLOSE\r\n");
+            close_sent  = 1;
+            state_timer = 0;
+            printf("ESP8266: time sync done, clock src = %s\r\n",
+                   (Clock_GetSource() == CLOCK_SRC_NET) ? "NET" : "RTC");
+        }
+        if (ESP8266_RxHas("OK") || ESP8266_RxHas("ERROR") ||
+            ESP8266_RxHas("CLOSED") || state_timer >= TICK_CIPCLOSE_WAIT) {
+            ESP8266_ClearRx();
+            ESP8266_SendCmd("AT+CIPMUX=0\r\n");
+            close_sent  = 0;
+            state_timer = 0;
+            esp_state   = ESP_STATE_TCP_START;
         }
         break;
 
@@ -513,6 +759,40 @@ void ESP8266_Process(void)
 
     /* ---- MQTT 在线 ---- */
     case ESP_STATE_MQTT_ONLINE:
+        /* ==== 周期校时探测：放最前面，它的 OK/ERROR 不能被当成 MQTT 断线 ==== */
+        if (probe_on) {
+            probe_timer++;
+            if (ESP8266_RxHas("+CIPSNTPTIME:")) {
+                DS1302_TIME nt;
+                if (TimeParse_SntpTime(ESP8266_RxStr(), &nt)) {
+                    Clock_NetSyncOk(&nt);
+                } else {
+                    Clock_NetSyncFail();
+                }
+                ESP8266_ClearRx();
+                probe_on = 0;
+            } else if (ESP8266_RxHas("ERROR")) {
+                sntp_supported = 0;     /* 这版 AT 固件不支持 SNTP，本轮到下次联网前不再试 */
+                printf("ESP8266: SNTP unavailable\r\n");
+                Clock_NetSyncFail();
+                ESP8266_ClearRx();
+                probe_on = 0;
+            } else if (probe_timer >= TICK_SNTP_PROBE_WAIT) {
+                Clock_NetSyncFail();
+                probe_on = 0;
+            }
+            break;                      /* 探测期间不做 MQTT 收发，避免互相打断 */
+        }
+        if (sntp_supported && Clock_NetSyncDue()) {
+            printf("ESP8266: SNTP recheck\r\n");
+            Clock_NetSyncTry();
+            ESP8266_ClearRx();
+            ESP8266_SendCmd("AT+CIPSNTPTIME?\r\n");
+            probe_on    = 1;
+            probe_timer = 0;
+            break;
+        }
+
         mqtt_timer++;
 
         /* 检测 TCP 断开 */
@@ -574,14 +854,17 @@ void ESP8266_Process(void)
     case ESP_STATE_TCP_DISCONNECT:
         mqtt_online = 0;
         mqtt_timer  = 0;
-        if (state_timer == 0) {
+        if (!close_sent) {
             ESP8266_SendCmd("AT+CIPCLOSE\r\n");
+            close_sent  = 1;
+            state_timer = 0;
             printf("ESP8266: CIPCLOSE sent\r\n");
         }
         /* 等待 CIPCLOSE 完成，避免 TCP 状态残留 */
         if (ESP8266_RxHas("CLOSED") || ESP8266_RxHas("OK") ||
             ESP8266_RxHas("ERROR") || state_timer >= TICK_CIPCLOSE_WAIT) {
             ESP8266_ClearRx();
+            close_sent = 0;
             Delay_ms(100);
             if (wifi_connected) {
                 state_timer = 0;
@@ -601,9 +884,19 @@ void ESP8266_Process(void)
     /* 计时器：仅在无新数据时推进 */
     if (!new_data) {
         state_timer++;
+    } else {
+        abs_ticks = 0;        /* 有新数据 = 有进展，保底计时清零 */
+        state_timer = 0;
     }
+
+    /* 状态发生了变化也算有进展 */
+    if (esp_state != last_state) {
+        last_state = esp_state;
+        abs_ticks  = 0;
+    }
+
     abs_ticks++;
-    /* 绝对超时保底：15s 无进展则强制复位 */
+    /* 绝对超时保底：连续 15s 既没新数据也没状态变化，才强制复位 */
     if (abs_ticks >= 750) {
         uint16_t i;
         abs_ticks = 0;
@@ -615,6 +908,9 @@ void ESP8266_Process(void)
         ESP8266_ClearRx();
         esp_state   = ESP_STATE_INIT;
         state_timer = 0;
+        last_state  = ESP_STATE_INIT;
+        close_sent  = 0;
+        probe_on    = 0;
         mqtt_online = 0;
         mqtt_timer  = 0;
     }

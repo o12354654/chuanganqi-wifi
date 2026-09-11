@@ -105,7 +105,14 @@ void DS1302_Init(void)
 
     RST_L();
     CLK_L();
-    DS1302_Write_Reg(0x8E, 0x00);
+    DS1302_Write_Reg(0x8E, 0x00);   /* 关写保护 */
+    DS1302_Write_Reg(0x8E, 0x80);   /* 恢复写保护，防误写(要写时间时 SetTime 会自己再打开) */
+}
+
+/* RTC 是否停振：秒寄存器 bit7(CH)=1 表示时钟停走，新片/掉电后常见 */
+uint8_t DS1302_IsHalt(void)
+{
+    return (DS1302_Read_Reg(0x81) & 0x80) ? 1 : 0;
 }
 
 void DS1302_SetTime(DS1302_TIME *time)
