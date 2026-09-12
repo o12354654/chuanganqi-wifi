@@ -489,6 +489,11 @@
               <FileType>1</FileType>
               <FilePath>.\relay_ctrl.c</FilePath>
             </File>
+            <File>
+              <FileName>relay_cloud.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\relay_cloud.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

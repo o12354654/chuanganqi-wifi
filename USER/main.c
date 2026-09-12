@@ -16,6 +16,7 @@
 #include "esp8266.h"
 #include "relay.h"
 #include "relay_ctrl.h"
+#include "relay_cloud.h"
 #include <string.h>
 
 u8 temp;
@@ -156,8 +157,11 @@ int main(void)
                 }
                 OLED_ShowString(96, 6, "%");
 
-                /* 继电器状态：左下角 ON / OFF（不想要就删这两行） */
-                OLED_ShowString(0, 6, (u8 *)(Relay_Ctrl_IsOn() ? "ON " : "OFF"));
+                /* 继电器状态：左下角 <来源><状态>（不想要就删这三行）
+                   C = 云端接管中，L = 本地温湿度联动在管（用 relay_ctrl.h 的阈值）
+                   显示的是继电器硬件实际状态 Relay_IsOn()，不是"应该"的状态 */
+                OLED_ShowString(0, 6, (u8 *)(Relay_Cloud_IsRemoteActive() ? "C" : "L"));
+                OLED_ShowString(6, 6, (u8 *)(Relay_IsOn() ? "ON " : "OFF"));
             }
 
             Delay_ms(20);
