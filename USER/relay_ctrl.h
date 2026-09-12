@@ -17,9 +17,10 @@
  */
 #define RCTRL_USE_TEMP       1        /* 启用温度联动 1/0 */
 #define RCTRL_TEMP_HIGH     28        /* 温度吸合阈值：℃（超过就开风扇） */
-#define RCTRL_TEMP_HYST      2        /* 温度回差：℃（吸合后降到 26 才断开，防卡在 28 上反复咔哒） */
+#define RCTRL_TEMP_HYST      1        /* 温度回差：℃（吸合后降到 26 及以下才断开；回差越小越跟手，代价是靠近
+                                         阈值时动作更频繁） */
 
-#define RCTRL_USE_HUMI       1        /* 启用湿度联动 1/0 */
+#define RCTRL_USE_HUMI       0        /* 启用湿度联动 1/0（这台风扇只按温度控制，湿度不参与） */
 #define RCTRL_HUMI_HIGH     80        /* 湿度吸合阈值：%RH */
 #define RCTRL_HUMI_HYST      5        /* 湿度回差：%（吸合后降到 75 才断开） */
 
