@@ -271,9 +271,9 @@ static void ESP8266_HandleDownlink(uint8_t *data, uint16_t len)
     uint16_t       pkt_id      = 0;
     uint8_t        qos         = 0;
     uint8_t        hit;
-    char           json[192];
-    char           id[24];
-    char           rep[128];
+    static char    json[192];   /* 栈紧张，这三块一律 static */
+    static char    id[24];
+    static char    rep[128];
     uint16_t       n;
     int            rlen;
 
@@ -331,14 +331,14 @@ static uint8_t ESP8266_TCPSend(uint8_t *data, uint16_t len)
     /* 等 ">" 提示符：这个循环是阻塞的，上限调小一点，
        ESP 正常几毫秒就回，2e6 次 @72MHz 万一不应答会拖住主循环好几秒 */
     timeout = 0;
-    while (!ESP8266_RxHas(">") && timeout < 200000) {
+    while (!ESP8266_RxHas(">") && timeout < 20000) {
         if (ESP8266_RxHas("ERROR") || ESP8266_RxHas("busy")) {
             printf("ESP8266: TCPSend rejected (%d)\r\n", len);
             return 1;
         }
         timeout++;
     }
-    if (timeout >= 200000) {
+    if (timeout >= 20000) {
         printf("ESP8266: TCPSend timeout, len=%d\r\n", len);
         /* 打印缓冲区内容帮助诊断 */
         rx_buf[rx_len] = '\0';
@@ -473,11 +473,13 @@ ESP8266_State ESP8266_GetState(void){ return esp_state; }
 /* ===================== 主状态机 ===================== */
 void ESP8266_Process(void)
 {
+    /* 大数组一律 static：本工程栈只有 512 字节(Stack_Size=0x200)，
+       局部数组会把栈顶穿，表现是随机跑飞而不是编译报错 */
+    static uint8_t onenet_data[128];  /* JSON 最长 ~88 字节 */
+    static char    tmp[96];
     uint8_t  new_data;
     uint16_t pkt_len;
-    uint8_t  onenet_data[128];  /* JSON 最长 ~88 字节 */
     int      slen;
-    char     tmp[96];
 
     /* ===== WiFi 掉线监听（模块会主动推 WIFI DISCONNECT，不必等 TCP 出错）===== */
     if (ESP8266_RxHas("WIFI DISCONNECT")) {
