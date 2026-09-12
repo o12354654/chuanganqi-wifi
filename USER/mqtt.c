@@ -166,7 +166,7 @@ uint8_t MQTT_ParsePublish(const uint8_t *data, uint16_t len,
                           const uint8_t **payload, uint16_t *payload_len,
                           uint16_t *pkt_id, uint8_t *qos)
 {
-    uint32_t rl;
+    uint32_t rl, frame_end;
     uint16_t used, pos, tlen;
     uint8_t  q;
 
@@ -174,43 +174,38 @@ uint8_t MQTT_ParsePublish(const uint8_t *data, uint16_t len,
     if ((data[0] & 0xF0) != MQTT_PUBLISH_Q0)                 return 0;
 
     q = (uint8_t)((data[0] >> 1) & 0x03);
+    if (q > 1) return 0;          /* QoS2/保留值：不支持。宁可丢弃，也不要执行了却不确认 */
+
     if (!mqtt_decode_len(data + 1, (uint16_t)(len - 1), &rl, &used)) return 0;
 
-    /* 没按剩余长度收全（缓冲里的字节比报文体声明的少）：不当有效帧，
-       否则会拿着半截 JSON 去解析 */
-    if ((uint32_t)(1 + used) + rl > (uint32_t)len) return 0;
+    /* 整帧必须落在缓冲里（frame_end 用 uint32 算，避免 uint16 相加回绕绕过检查） */
+    frame_end = (uint32_t)(1 + used) + rl;
+    if (frame_end > (uint32_t)len) return 0;
 
     pos = (uint16_t)(1 + used);
 
-    if (q > 0) {                                   /* QoS1/2 带报文标识符 */
-        if ((uint16_t)(pos + 2) > len) return 0;
+    /* ===== MQTT 3.1.1：变量头顺序是 Topic Name → Packet Identifier → Payload =====
+       （原先写成先读报文标识符再读 topic，于是任何 QoS1 帧都会解析失败、PUBACK 也发不出去） */
+    if ((uint32_t)pos + 2 > frame_end) return 0;
+    tlen = (uint16_t)((data[pos] << 8) | data[pos + 1]);
+    pos  = (uint16_t)(pos + 2);
+
+    if ((uint32_t)pos + tlen > frame_end) return 0;
+    if (topic)     *topic     = (const char *)(data + pos);
+    if (topic_len) *topic_len = tlen;
+    pos = (uint16_t)(pos + tlen);
+
+    if (q > 0) {                                   /* 报文标识符在 topic 之后 */
+        if ((uint32_t)pos + 2 > frame_end) return 0;
         if (pkt_id) *pkt_id = (uint16_t)((data[pos] << 8) | data[pos + 1]);
         pos = (uint16_t)(pos + 2);
     } else if (pkt_id) {
         *pkt_id = 0;
     }
 
-    if ((uint16_t)(pos + 2) > len) return 0;
-    tlen = (uint16_t)((data[pos] << 8) | data[pos + 1]);
-    pos  = (uint16_t)(pos + 2);
-
-    if ((uint16_t)(pos + tlen) > len) return 0;
-    if (topic)     *topic     = (const char *)(data + pos);
-    if (topic_len) *topic_len = tlen;
-    pos = (uint16_t)(pos + tlen);
-
-    if (payload || payload_len) {
-        /* 负载长度 = min(报文体里声明还剩的, 缓冲里实际还剩的)，防越界 */
-        uint16_t head  = pos;                                    /* 头部+topic 已消耗 */
-        uint32_t body  = rl;                                     /* 剩余长度字段声明的报文体 */
-        uint16_t avail = (uint16_t)(len - pos);
-        uint16_t rem   = (body > (uint32_t)(head - (uint16_t)(1 + used)))
-                       ? (uint16_t)(body - (uint32_t)(head - (uint16_t)(1 + used)))
-                       : 0;
-        if (rem < avail) avail = rem;
-        if (payload)     *payload     = data + pos;
-        if (payload_len) *payload_len = avail;
-    }
+    /* 负载 = 帧尾之前剩下的全部（帧边界已封闭，不需要再和缓冲余额取小） */
+    if (payload)     *payload     = data + pos;
+    if (payload_len) *payload_len = (uint16_t)(frame_end - pos);
 
     if (qos) *qos = q;
 

@@ -28,7 +28,10 @@ static uint32_t s_last_ms  = 0;   /* 上一次状态改变的时刻 */
 static uint8_t ctrl_over_limit(uint8_t value, uint8_t high, uint8_t hyst, uint8_t on)
 {
     if (on) {
-        return (uint8_t)(value >= (uint8_t)(high - hyst));
+        /* 饱和减法：回差若被配成 >= 阈值，high-hyst 会下溢成 236 之类的大数，
+           门限当场反转、触点每个保持周期咔哒一次 */
+        uint8_t rel = (high > hyst) ? (uint8_t)(high - hyst) : 0;
+        return (uint8_t)(value >= rel);
     }
     return (uint8_t)(value >= high);
 }
@@ -131,4 +134,18 @@ void Relay_Ctrl_SetLocalEnable(uint8_t en)
 uint8_t Relay_Ctrl_IsLocalEnabled(void)
 {
     return s_local_en;
+}
+
+/**
+ * @brief  把本地缓存的判定状态对齐到继电器的真实状态
+ * @param  hw_on 继电器当前实际是否吸合（传 Relay_IsOn()）
+ * @note   云端接管期间继电器被直接开关过，本地这边并不知道；
+ *         交还控制权时若不同步，本地会拿旧状态做比较而卡住不动 ——
+ *         表现为"温度越限风扇不起"或"环境恢复了风扇一直转"。
+ *         同步时把最短保持计时往前拨一个周期，允许交还后立刻纠正。
+ */
+void Relay_Ctrl_SyncFromHw(uint8_t hw_on)
+{
+    s_on      = hw_on ? 1 : 0;
+    s_last_ms = Clock_Millis() - RCTRL_MIN_HOLD_MS;
 }

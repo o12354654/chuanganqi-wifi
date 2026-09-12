@@ -16,8 +16,8 @@
  * 阈值按你的用途改：降温（风机）用温度高值吸合；只关心一路的话把另一个 USE 置 0
  */
 #define RCTRL_USE_TEMP       1        /* 启用温度联动 1/0 */
-#define RCTRL_TEMP_HIGH     30        /* 温度吸合阈值：℃ */
-#define RCTRL_TEMP_HYST      2        /* 温度回差：℃（吸合后降到 28 才断开） */
+#define RCTRL_TEMP_HIGH     28        /* 温度吸合阈值：℃（超过就开风扇） */
+#define RCTRL_TEMP_HYST      2        /* 温度回差：℃（吸合后降到 26 才断开，防卡在 28 上反复咔哒） */
 
 #define RCTRL_USE_HUMI       1        /* 启用湿度联动 1/0 */
 #define RCTRL_HUMI_HIGH     80        /* 湿度吸合阈值：%RH */
@@ -29,8 +29,9 @@ void    Relay_Ctrl_Init(void);
 void    Relay_Ctrl_Task(uint8_t dht_ok, uint8_t temp, uint8_t humi);
 uint8_t Relay_Ctrl_IsOn(void);
 
-/* 云端接管的接口（现在用不到，先留着） */
+/* 云端接管的接口 */
 void    Relay_Ctrl_SetLocalEnable(uint8_t en);
 uint8_t Relay_Ctrl_IsLocalEnabled(void);
+void    Relay_Ctrl_SyncFromHw(uint8_t hw_on);   /* 交还控制权前先对齐硬件实际状态 */
 
 #endif

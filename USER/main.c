@@ -16,7 +16,6 @@
 #include "esp8266.h"
 #include "relay.h"
 #include "relay_ctrl.h"
-#include "relay_cloud.h"
 #include <string.h>
 
 u8 temp;
@@ -157,11 +156,10 @@ int main(void)
                 }
                 OLED_ShowString(96, 6, "%");
 
-                /* 继电器状态：左下角 <来源><状态>（不想要就删这三行）
-                   C = 云端接管中，L = 本地温湿度联动在管（用 relay_ctrl.h 的阈值）
-                   显示的是继电器硬件实际状态 Relay_IsOn()，不是"应该"的状态 */
-                OLED_ShowString(0, 6, (u8 *)(Relay_Cloud_IsRemoteActive() ? "C" : "L"));
-                OLED_ShowString(6, 6, (u8 *)(Relay_IsOn() ? "ON " : "OFF"));
+                /* 风扇状态：继电器吸合 = 风扇通电
+                   放在温湿度那块的前面（温度行），与中文之间正好隔一个字符宽的空格
+                   "ON " 带尾空格：既对齐 OFF，也覆盖从 OFF 切过来时的残留字符 */
+                OLED_ShowString(8, 4, (u8 *)(Relay_IsOn() ? "ON " : "OFF"));
             }
 
             Delay_ms(20);
