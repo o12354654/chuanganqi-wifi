@@ -16,7 +16,12 @@
 #define MQTT_CLIENT_ID  ONENET_DEVICE
 
 #define TOPIC_UPLOAD    "$sys/" ONENET_PID "/" ONENET_DEVICE "/thing/property/post"
+#define TOPIC_PROP_SET  "$sys/" ONENET_PID "/" ONENET_DEVICE "/thing/property/set"
+#define TOPIC_SET_REPLY "$sys/" ONENET_PID "/" ONENET_DEVICE "/thing/property/set_reply"
 #define MQTT_KEEPALIVE  60
+
+/* SUBSCRIBE 的报文标识符：同一条 TCP 连接内别重复，固定 1 就够 */
+#define MQTT_SUB_PKT_ID 1
 
 #define TICK_INIT_WAIT         100
 #define TICK_AT_TIMEOUT        150
@@ -27,6 +32,7 @@
 #define TICK_CONNACK_TIMEOUT   300
 #define TICK_MQTT_PUB          250
 #define TICK_MQTT_PING         1500
+#define TICK_MQTT_SUB_RETRY     500   /* 订阅迟迟没被确认时，多久重订一次（~10s） */
 #define TICK_CIPCLOSE_WAIT      25
 
 /* ===== 网络授时（时间同步）===== */

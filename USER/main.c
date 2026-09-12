@@ -14,6 +14,8 @@
 #include "oled.h"
 #include "clock.h"
 #include "esp8266.h"
+#include "relay.h"
+#include "relay_ctrl.h"
 #include <string.h>
 
 u8 temp;
@@ -46,6 +48,11 @@ int main(void)
        DS1302 时间无效或停振(新片/掉电)会自动写默认时间并启动走时 */
     Clock_Init();
 
+    /* 继电器：驱动 + 本地温湿度阈值联动（云端控制以后再挂到同一个驱动上）。
+       上电停在"断开"；阈值/回差/最短保持时间都在 relay_ctrl.h 里配 */
+    Relay_Init();
+    Relay_Ctrl_Init();
+
     while (DHT11_Init())
     {
         printf("DHT11 Error \r\n");
@@ -66,8 +73,12 @@ int main(void)
             if (oled_tick >= 50) {
                 oled_tick = 0;
 
-                if (DHT11_Read_Data(&temp, &humi) != 0) {
-                    printf("DHT11 read fail\r\n");
+                {
+                    u8 dht_ok = (DHT11_Read_Data(&temp, &humi) == 0);
+                    if (!dht_ok) {
+                        printf("DHT11 read fail\r\n");
+                    }
+                    Relay_Ctrl_Task(dht_ok, temp, humi);   /* 读失败：本轮保持现状 */
                 }
                 Clock_GetTime(&time);   /* 时间来源：网络 / DS1302 */
 
@@ -144,6 +155,11 @@ int main(void)
                     OLED_ShowNum(80, 6, humi, 2, 16);
                 }
                 OLED_ShowString(96, 6, "%");
+
+                /* 风扇状态：继电器吸合 = 风扇通电
+                   放在温湿度那块的前面（温度行），与中文之间正好隔一个字符宽的空格
+                   "ON " 带尾空格：既对齐 OFF，也覆盖从 OFF 切过来时的残留字符 */
+                OLED_ShowString(8, 4, (u8 *)(Relay_IsOn() ? "ON " : "OFF"));
             }
 
             Delay_ms(20);

@@ -25,6 +25,7 @@
 #include "misc.h"
 #include "clock.h"
 #include "timeparse.h"
+#include "relay_cloud.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -45,6 +46,7 @@ static uint32_t       abs_ticks       = 0;   // 绝对滴答（每 20ms 递增�
 static uint8_t        wifi_connected  = 0;
 static uint8_t        mqtt_online     = 0;
 static uint32_t       mqtt_timer      = 0;   // MQTT 在线计时
+static uint8_t        sub_ok          = 0;   // 订阅是否已被平台确认（收到 SUBACK）
 
 /* ===================== 授时变量 ===================== */
 static uint8_t  sntp_try              = 0;   /* SNTP 已问过几次 */
@@ -53,6 +55,16 @@ static uint8_t  sntp_supported        = 1;   /* 这版 AT 固件是否支持 SNT
 static uint8_t  probe_on              = 0;   /* MQTT 在线时的周期性校时 */
 static uint16_t probe_timer           = 0;
 static uint8_t  close_sent            = 0;   /* CIPCLOSE 只发一次 */
+
+/* ===================== 下行回执记账 =====================
+ * 收到属性设置后不能当场发回执：发回执要过 TCPSend，它会清接收缓冲，
+ * 而同一个缓冲里可能还躺着别的帧。所以先记账，等所有帧处理完再统一发。
+ */
+static char     dl_reply[160];        /* 待发 set_reply 的 JSON */
+static uint16_t dl_rlen          = 0;
+static uint8_t  dl_reply_ready   = 0;
+static uint16_t dl_puback_id     = 0;
+static uint8_t  dl_puback_ready  = 0;
 static ESP8266_State last_state       = ESP_STATE_INIT;  /* 防卡死保底用 */
 
 /* ===================== 透传变量 ===================== */
@@ -78,6 +90,11 @@ static void   ESP8266_TransparentEnter(void);
 static void   ESP8266_TransparentExit(void);
 static uint8_t ESP8266_TCPSend(uint8_t *data, uint16_t len);
 static uint8_t ESP8266_ParseIPD(char *buf, uint16_t *plen, uint8_t **pdata);
+static void    ESP8266_SendSubscribe(void);
+static void    ESP8266_ProcessDownlink(void);
+static void    ESP8266_FlushDownlink(void);
+static void    ESP8266_HandleDownlink(uint8_t *data, uint16_t len);
+static void    ESP8266_JsonId(const char *json, char *out, uint16_t max);
 
 /* ===================== USART2 初始化 ===================== */
 static void ESP8266_USART2_Init(uint32_t baud)
@@ -219,6 +236,165 @@ static uint8_t ESP8266_ParseIPD(char *buf, uint16_t *plen, uint8_t **pdata)
     return 1;
 }
 
+/* ===================== 订阅云端属性设置 ===================== */
+static void ESP8266_SendSubscribe(void)
+{
+    uint16_t n = MQTT_BuildSubscribe(tx_buf, TOPIC_PROP_SET, MQTT_SUB_PKT_ID);
+
+    if (ESP8266_TCPSend(tx_buf, n) == 0) {
+        printf("ESP8266: SUB %s\r\n", TOPIC_PROP_SET);
+    } else {
+        printf("ESP8266: SUB send fail\r\n");
+    }
+}
+
+/* 从下发 JSON 里抠出 "id" 的值（set_reply 要原样带回） */
+static void ESP8266_JsonId(const char *json, char *out, uint16_t max)
+{
+    const char *p;
+    uint16_t    n = 0;
+
+    if (!out || max == 0) return;
+    out[0] = '\0';
+
+    p = strstr(json, "\"id\"");
+    if (!p) return;
+
+    p = strchr(p + 4, ':');
+    if (!p) return;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\"') p++;
+    while (*p && *p != '\"' && n < (uint16_t)(max - 1)) out[n++] = *p++;
+    out[n] = '\0';
+}
+
+/**
+ * @brief  处理一帧下行 MQTT 数据（+IPD 里的载荷）
+ * @note   topic / payload 都直接指进接收缓冲，所以先把要用的东西拷到栈上再发报文——
+ *         TCPSend 内部会清接收缓冲，指针一发就废
+ *         QoS1 的下发必须先回 PUBACK；命中的属性再按 OneNET 物模型规范回 set_reply
+ */
+static void ESP8266_HandleDownlink(uint8_t *data, uint16_t len)
+{
+    const char    *topic;
+    const uint8_t *payload;
+    uint16_t       topic_len   = 0;
+    uint16_t       payload_len = 0;
+    uint16_t       pkt_id      = 0;
+    uint8_t        qos         = 0;
+    uint8_t        hit;
+    static char    json[384];   /* 栈紧张，一律 static；放大到 384：多属性 OneJSON 可能很长，
+                                   截断会让靠后的属性静默失效（回给云端的是"未知属性"，方向全被带偏） */
+    static char    id[24];
+    uint16_t       n;
+
+    if (len >= 4 && (data[0] & 0xF0) == MQTT_SUBACK) {
+        /* 第 4 字节是平台给的返回码：0x00 = 授予 QoS0，0x80 = 未授权/订阅失败。
+           原先只看报文类型就置 sub_ok，订阅被平台拒绝时会"永远订不上却看不出来" */
+        sub_ok = (uint8_t)(data[3] == 0x00);
+        return;
+    }
+
+    if (!MQTT_ParsePublish(data, len, &topic, &topic_len,
+                           &payload, &payload_len, &pkt_id, &qos)) {
+        return;                        /* PINGRESP 之类：不是下发，不理 */
+    }
+
+    if (topic_len != (uint16_t)strlen(TOPIC_PROP_SET) ||
+        strncmp(topic, TOPIC_PROP_SET, topic_len) != 0) {
+        return;                        /* 不是本设备的下发 topic */
+    }
+
+    n = (payload_len < (uint16_t)(sizeof(json) - 1)) ? payload_len
+                                                     : (uint16_t)(sizeof(json) - 1);
+    memcpy(json, payload, n);
+    json[n] = '\0';
+
+    ESP8266_JsonId(json, id, (uint16_t)sizeof(id));
+
+    hit = Relay_Cloud_HandleSet(json, n);   /* 让位给云端 + 开关继电器 */
+
+    /* 回执只记账，不在这里发（发报文的 TCPSend 会清接收缓冲，
+       会把同一缓冲里还没处理的帧一起清掉） */
+    if (qos == 1) {                         /* QoS1：不回 PUBACK 服务端会一直重发 */
+        dl_puback_id    = pkt_id;
+        dl_puback_ready = 1;
+    }
+
+    /* 按 OneNET 物模型规范回 set_reply：命中的回 200，没认出来的回 404，
+       这样云端能看到是"执行了"还是"属性名没对上"，不用盯串口 */
+    dl_rlen = (uint16_t)sprintf(dl_reply, "{\"id\":\"%s\",\"code\":%d,\"msg\":\"%s\"}",
+                                (id[0] ? id : "0"), (hit ? 200 : 404),
+                                (hit ? "success" : "unknown property"));
+    dl_reply_ready = 1;
+}
+
+/* ===================== 发下行回执（所有帧处理完之后才调用） ===================== */
+static void ESP8266_FlushDownlink(void)
+{
+    uint16_t n;
+
+    if (dl_puback_ready) {                 /* QoS1 必须先确认，否则服务端会一直重发 */
+        dl_puback_ready = 0;
+        n = MQTT_BuildPubAck(tx_buf, dl_puback_id);
+        ESP8266_TCPSend(tx_buf, n);
+    }
+    if (dl_reply_ready) {
+        dl_reply_ready = 0;
+        n = MQTT_BuildPublish(tx_buf, TOPIC_SET_REPLY,
+                              (const uint8_t *)dl_reply, dl_rlen);
+        ESP8266_TCPSend(tx_buf, n);
+    }
+}
+
+/**
+ * @brief  处理接收缓冲里所有"已经收全"的下行 +IPD 帧
+ * @note   三个要点：
+ *         ① 帧没到齐就原地等下一轮 —— 不半帧处理、也不清缓冲。
+ *            115200 下一帧 112 字节要占约 9.7ms 线时，而主循环一轮约 20ms，
+ *            帧跨轮到达是常态；原先"一看到 +IPD 就按截断长度处理并无条件清缓冲"，
+ *            结果是命令时灵时不灵、还没法从面板上看出来
+ *         ② 一个缓冲里可能挤着好几帧（PINGRESP/SUBACK 和 set 报文落到同一个 20ms 窗口），
+ *            循环把收全的都处理掉
+ *         ③ 只搬走已消费的字节（memmove 剩下的到缓冲头），不再整块清掉
+ */
+static void ESP8266_ProcessDownlink(void)
+{
+    uint16_t consumed = 0;
+
+    for (;;) {
+        char     *buf = ESP8266_RxStr();                      /* 补 '\0' 并返回缓冲 */
+        char     *ipd = strstr(buf + consumed, "+IPD,");
+        uint16_t  dstart, ipd_len;
+        uint8_t  *ipd_data;
+
+        if (!ipd) break;                                       /* 没有更多 +IPD 了 */
+
+        if (!ESP8266_ParseIPD(ipd, &ipd_len, &ipd_data)) break; /* 头还没收全 */
+
+        dstart = (uint16_t)(ipd_data - (uint8_t *)buf);        /* 统一指针类型，别让编译器抱怨 */
+        if ((uint32_t)dstart > rx_len) break;
+        if ((uint32_t)dstart + ipd_len > rx_len) break;        /* 数据没到齐：等下一轮 */
+
+        ESP8266_HandleDownlink(ipd_data, ipd_len);
+        consumed = (uint16_t)(dstart + ipd_len);
+    }
+
+    if (consumed) {
+        /* 只搬走已消费的部分（关中断，别和接收中断抢缓冲） */
+        USART_ITConfig(USART2, USART_IT_RXNE, DISABLE);
+        rx_len = (uint16_t)(rx_len - consumed);
+        if (rx_len) {
+            memmove(rx_buf, rx_buf + consumed, rx_len);
+        }
+        rx_buf[rx_len] = '\0';
+        last_rx_len = rx_len;
+        USART_ITConfig(USART2, USART_IT_RXNE, ENABLE);
+    }
+
+    ESP8266_FlushDownlink();       /* 回执最后发：它内部的 TCPSend 会清缓冲 */
+}
+
 /* ===================== TCP 发送（阻塞，带超时诊断） ===================== */
 static uint8_t ESP8266_TCPSend(uint8_t *data, uint16_t len)
 {
@@ -235,14 +411,14 @@ static uint8_t ESP8266_TCPSend(uint8_t *data, uint16_t len)
     /* 等 ">" 提示符：这个循环是阻塞的，上限调小一点，
        ESP 正常几毫秒就回，2e6 次 @72MHz 万一不应答会拖住主循环好几秒 */
     timeout = 0;
-    while (!ESP8266_RxHas(">") && timeout < 200000) {
+    while (!ESP8266_RxHas(">") && timeout < 20000) {
         if (ESP8266_RxHas("ERROR") || ESP8266_RxHas("busy")) {
             printf("ESP8266: TCPSend rejected (%d)\r\n", len);
             return 1;
         }
         timeout++;
     }
-    if (timeout >= 200000) {
+    if (timeout >= 20000) {
         printf("ESP8266: TCPSend timeout, len=%d\r\n", len);
         /* 打印缓冲区内容帮助诊断 */
         rx_buf[rx_len] = '\0';
@@ -285,6 +461,8 @@ static void ESP8266_TransparentExit(void)
     probe_on    = 0;
     mqtt_online = 0;
     mqtt_timer  = 0;
+    sub_ok      = 0;
+    Relay_Cloud_OnMqttLost();
     printf("\r\n=== transparent mode exited ===\r\n");
 }
 
@@ -375,11 +553,13 @@ ESP8266_State ESP8266_GetState(void){ return esp_state; }
 /* ===================== 主状态机 ===================== */
 void ESP8266_Process(void)
 {
+    /* 大数组一律 static：本工程栈只有 512 字节(Stack_Size=0x200)，
+       局部数组会把栈顶穿，表现是随机跑飞而不是编译报错 */
+    static uint8_t onenet_data[128];  /* JSON 最长 ~88 字节 */
+    static char    tmp[96];
     uint8_t  new_data;
     uint16_t pkt_len;
-    uint8_t  onenet_data[128];  /* JSON 最长 ~88 字节 */
     int      slen;
-    char     tmp[96];
 
     /* ===== WiFi 掉线监听（模块会主动推 WIFI DISCONNECT，不必等 TCP 出错）===== */
     if (ESP8266_RxHas("WIFI DISCONNECT")) {
@@ -745,6 +925,7 @@ void ESP8266_Process(void)
                     mqtt_timer  = 0;
                     ESP8266_ClearRx();
                     esp_state   = ESP_STATE_MQTT_ONLINE;
+                    ESP8266_SendSubscribe();   /* 订阅云端属性设置，等云端下发控制 */
                 } else {
                     printf("ESP8266: CONNACK err=%d\r\n", result);
                     esp_state = ESP_STATE_TCP_DISCONNECT;
@@ -759,6 +940,11 @@ void ESP8266_Process(void)
 
     /* ---- MQTT 在线 ---- */
     case ESP_STATE_MQTT_ONLINE:
+        /* ==== 下行最先处理 ====
+           本分支后面的重订、上报、心跳都会走 TCPSend，而它内部会清接收缓冲：
+           先清后查 = 这一轮到达的云端命令原地消失（订阅 QoS0，平台不会重发） */
+        ESP8266_ProcessDownlink();
+
         /* ==== 周期校时探测：放最前面，它的 OK/ERROR 不能被当成 MQTT 断线 ==== */
         if (probe_on) {
             probe_timer++;
@@ -794,6 +980,12 @@ void ESP8266_Process(void)
         }
 
         mqtt_timer++;
+
+        /* 订阅一直没被平台确认就周期性重订：
+           漏了订阅 = 云端下发永远收不到，表面上还看不出来 */
+        if (!sub_ok && (mqtt_timer % TICK_MQTT_SUB_RETRY) == 0) {
+            ESP8266_SendSubscribe();
+        }
 
         /* 检测 TCP 断开 */
         if (ESP8266_RxHas("CLOSED") || ESP8266_RxHas("ERROR")) {
@@ -841,11 +1033,6 @@ void ESP8266_Process(void)
             }
         }
 
-        /* 清理旧的 +IPD 数据，避免重复检测 */
-        if (ESP8266_RxHas("+IPD,")) {
-            ESP8266_ClearRx();
-        }
-
         /* 防止 mqtt_timer 溢出 */
         if (mqtt_timer >= 60000) mqtt_timer = 0;
         break;
@@ -854,6 +1041,8 @@ void ESP8266_Process(void)
     case ESP_STATE_TCP_DISCONNECT:
         mqtt_online = 0;
         mqtt_timer  = 0;
+        sub_ok      = 0;
+        Relay_Cloud_OnMqttLost();   /* MQTT 掉线 → 控制权交还本地联动（fail-safe） */
         if (!close_sent) {
             ESP8266_SendCmd("AT+CIPCLOSE\r\n");
             close_sent  = 1;
@@ -913,5 +1102,7 @@ void ESP8266_Process(void)
         probe_on    = 0;
         mqtt_online = 0;
         mqtt_timer  = 0;
+        sub_ok      = 0;
+        Relay_Cloud_OnMqttLost();
     }
 }
