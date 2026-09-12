@@ -410,6 +410,11 @@
           <GroupName>startup</GroupName>
           <Files>
             <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\main.c</FilePath>
+            </File>
+            <File>
               <FileName>startup_stm32f10x_md.s</FileName>
               <FileType>2</FileType>
               <FilePath>..\CMSIS\startup\startup_stm32f10x_md.s</FilePath>
@@ -419,11 +424,6 @@
         <Group>
           <GroupName>USER</GroupName>
           <Files>
-            <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\main.c</FilePath>
-            </File>
             <File>
               <FileName>usart1.c</FileName>
               <FileType>1</FileType>
@@ -478,6 +478,16 @@
               <FileName>clock.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\clock.c</FilePath>
+            </File>
+            <File>
+              <FileName>relay.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\relay.c</FilePath>
+            </File>
+            <File>
+              <FileName>relay_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\relay_ctrl.c</FilePath>
             </File>
           </Files>
         </Group>
