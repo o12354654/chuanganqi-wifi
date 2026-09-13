@@ -68,61 +68,56 @@ static uint8_t match_literal(const char **pp, const char *end, const char *lit)
 }
 
 /**
- * @brief  取某个属性的布尔值
- * @param  json/len 负载（len = 有效字节数；只在这个范围内搜索，不会越读）
- * @param  key      属性标识符，如 "relay"
- * @param  out      出参：1 = 吸合，0 = 断开
- * @return 1 = 找到并解析成功
- * @note   只认这一种形状：..."key" : { ... "value" : <true|false|1|0|on|off> ... }
- *         ① 键名必须是完整的键（前一个非空白字符是 { 或 ,）——
- *            这样 {"mode":{"value":"relay"}} 这种"值里出现 relay"不会误命中
- *         ② value 必须落在该属性自己的 {} 里面 ——
- *            不会拿后面别的属性的 value 顶替（原先是"key 之后第一处 value"，会串台）
- *         ③ 字面量大小写不敏感，但必须完整匹配（TRUE/On 认，truey/offline/12 不认）
- *         ④ 同一个键出现两次时取先出现的那个（保守一侧）
+ * @brief  定位"作为键出现的 key"（形状不限），返回它的位置；找不到返回 NULL
+ * @note   键名必须完整：前一个非空白字符是 { 或 , ——
+ *         否则 {"mode":{"value":"relay"}} 这种"值里出现 relay"也会被当成命中
  */
-static uint8_t cloud_json_get_bool(const char *json, uint16_t len,
-                                   const char *key, uint8_t *out)
+static const char *find_key(const char *json, const char *end, const char *key)
 {
-    static char pat[64];      /* 栈紧张，一律 static（这两个函数不会重入） */
-    const char *end;
-    const char *p, *q, *v;
-    const char *obj, *obj_end;
+    static char pat[64];      /* 栈紧张，一律 static（本文件这几个函数不会重入） */
+    const char *p = json;
     uint16_t    klen = (uint16_t)strlen(key);
-    uint32_t    depth;
 
-    if (!json || !key || klen == 0) return 0;
-    if ((uint16_t)(klen + 3) > sizeof(pat)) return 0;
-    if (len == 0) len = (uint16_t)strlen(json);   /* 兼容不传长度的调用 */
-    end = json + len;
+    if (!key || klen == 0) return NULL;
+    if ((uint16_t)(klen + 3) > sizeof(pat)) return NULL;
 
-    pat[0] = '"';
+    pat[0] = '\"';
     memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
+    pat[klen + 1] = '\"';
     pat[klen + 2] = '\0';
 
-    /* ① 找"作为键"出现的 key */
-    p = json;
     for (;;) {
         const char *hit = mem_find(p, end, pat);
         const char *back;
 
-        if (!hit) return 0;
+        if (!hit) return NULL;
 
         back = hit;
         while (back > json && (back[-1] == ' ' || back[-1] == '\t')) back--;
-        if (back > json && (back[-1] == '{' || back[-1] == ',')) {
-            p = hit;                       /* 认这个键：从它的位置往下解析（漏了这句会跑去解析别的属性） */
-            break;
-        }
+        if (back > json && (back[-1] == '{' || back[-1] == ',')) return hit;   /* 是完整的键 */
         p = hit + 1;                       /* 只是字符串值里出现了同名文字，继续往后找 */
     }
+}
 
-    /* ② 定位到该属性自己的对象： "key" : { ... } */
+/**
+ * @brief  形状①：带 value 一层（设备上报/部分平台版本用）
+ *              "key" : { ... "value" : <true|false|1|0|on|off> ... }
+ * @note   value 必须落在该属性自己的 {} 里面 —— 不会拿后面别的属性的 value 顶替
+ */
+static uint8_t cloud_get_bool_wrapped(const char *json, const char *end,
+                                      const char *key, uint8_t *out)
+{
+    const char *p, *q, *v, *obj, *obj_end;
+    uint16_t    klen = (uint16_t)strlen(key);
+    uint32_t    depth;
+
+    p = find_key(json, end, key);
+    if (!p) return 0;
+
     q = skip_ws(p + klen + 2, end);
     if (q >= end || *q != ':') return 0;
     q = skip_ws(q + 1, end);
-    if (q >= end || *q != '{') return 0;             /* 不是 {"key":{"value":...}} 形状 */
+    if (q >= end || *q != '{') return 0;             /* 不是 {\"key\":{...}} 形状，交给形状② */
 
     obj     = q + 1;
     depth   = 1;
@@ -135,15 +130,13 @@ static uint8_t cloud_json_get_bool(const char *json, uint16_t len,
     }
     if (depth != 0) return 0;                        /* 对象没收全，不猜 */
 
-    /* ③ 在对象内部找 value 键 */
     v = mem_find(obj, obj_end, "\"value\"");
     if (!v) return 0;
     v = skip_ws(v + 7, obj_end);
     if (v >= obj_end || *v != ':') return 0;
     v = skip_ws(v + 1, obj_end);
-    if (v < obj_end && *v == '"') v = skip_ws(v + 1, obj_end);   /* "value":"true" 这种写法 */
+    if (v < obj_end && *v == '\"') v = skip_ws(v + 1, obj_end);   /* \"value\":\"true\" 这种写法 */
 
-    /* ④ 取值 */
     if (match_literal(&v, obj_end, "true")  ||
         match_literal(&v, obj_end, "on")    ||
         match_literal(&v, obj_end, "1")) {
@@ -158,6 +151,67 @@ static uint8_t cloud_json_get_bool(const char *json, uint16_t len,
     }
 
     return 0;
+}
+
+/**
+ * @brief  形状②：扁平（OneNET 平台的 property/set 下发就是这个形状）
+ *              "key" : <true|false|1|0|on|off>     或   "key" : "true"
+ * @note   平台下发和上报的形状不一样：上报 params 里是 {"value":...}，
+ *         下发 params 里直接就是值。只认一种会"通信通了但继电器不动"
+ */
+static uint8_t cloud_get_bool_flat(const char *json, const char *end,
+                                   const char *key, uint8_t *out)
+{
+    const char *p, *v;
+    uint16_t    klen = (uint16_t)strlen(key);
+
+    p = find_key(json, end, key);
+    if (!p) return 0;
+
+    v = skip_ws(p + klen + 2, end);
+    if (v >= end || *v != ':') return 0;
+    v = skip_ws(v + 1, end);
+    if (v < end && *v == '\"') v = skip_ws(v + 1, end);   /* \"relay\": \"true\" */
+    if (v < end && *v == '{') return 0;                   /* 是带 value 那层，交给形状① */
+
+    if (match_literal(&v, end, "true")  ||
+        match_literal(&v, end, "on")    ||
+        match_literal(&v, end, "1")) {
+        *out = 1;
+        return 1;
+    }
+    if (match_literal(&v, end, "false") ||
+        match_literal(&v, end, "off")   ||
+        match_literal(&v, end, "0")) {
+        *out = 0;
+        return 1;
+    }
+
+    return 0;                        /* 认了键但值不是布尔：不猜，宁可回 404 */
+}
+
+/**
+ * @brief  取某个属性的布尔值（两种形状都认）
+ * @param  json/len 负载（len = 有效字节数；只在这个范围内搜索，不会越读）
+ * @param  key      属性标识符，如 "relay"
+ * @param  out      出参：1 = 吸合，0 = 断开
+ * @return 1 = 找到并解析成功
+ * @note   形状①（上报那种）: "key" : { ... "value" : <布尔> ... }
+ *         形状②（下发那种）: "key" : <布尔>
+ *         字面量大小写不敏感，但必须完整匹配（TRUE/On 认，truey/offline/12 不认）；
+ *         同一个键出现两次时取先出现的那个（保守一侧）
+ */
+static uint8_t cloud_json_get_bool(const char *json, uint16_t len,
+                                   const char *key, uint8_t *out)
+{
+    const char *end;
+
+    if (!json || !key || !*key) return 0;
+    if (len == 0) len = (uint16_t)strlen(json);   /* 兼容不传长度的调用 */
+    end = json + len;
+
+    if (cloud_get_bool_wrapped(json, end, key, out)) return 1;
+    return cloud_get_bool_flat(json, end, key, out);
 }
 
 /**

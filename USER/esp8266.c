@@ -310,6 +310,8 @@ static void ESP8266_HandleDownlink(uint8_t *data, uint16_t len)
 
     if (topic_len != (uint16_t)strlen(TOPIC_PROP_SET) ||
         strncmp(topic, TOPIC_PROP_SET, topic_len) != 0) {
+        /* 临时诊断（定位完了删）：帧收到了但 topic 不是我们的 */
+        printf("MQTT SET: topic mismatch [%.*s]\r\n", (int)topic_len, topic);
         return;                        /* 不是本设备的下发 topic */
     }
 
@@ -319,6 +321,8 @@ static void ESP8266_HandleDownlink(uint8_t *data, uint16_t len)
     json[n] = '\0';
 
     ESP8266_JsonId(json, id, (uint16_t)sizeof(id));
+
+    printf("MQTT SET: %s\r\n", json);   /* 临时诊断（定位完了删）：云端下发的原文 */
 
     hit = Relay_Cloud_HandleSet(json, n);   /* 让位给云端 + 开关继电器 */
 
@@ -348,10 +352,14 @@ static void ESP8266_FlushDownlink(void)
         ESP8266_TCPSend(tx_buf, n);
     }
     if (dl_reply_ready) {
+        uint16_t r;
+
         dl_reply_ready = 0;
         n = MQTT_BuildPublish(tx_buf, TOPIC_SET_REPLY,
                               (const uint8_t *)dl_reply, dl_rlen);
-        ESP8266_TCPSend(tx_buf, n);
+        r = ESP8266_TCPSend(tx_buf, n);
+        /* 临时诊断（定位完了删）：回执发不出去原来是静默的 */
+        printf("MQTT SET reply: %s\r\n", (r == 0) ? "sent" : "FAIL");
     }
 }
 
