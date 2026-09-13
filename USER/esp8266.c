@@ -1138,6 +1138,10 @@ void ESP8266_Process(void)
         mqtt_online = 0;
         mqtt_timer  = 0;
         sub_ok      = 0;
-        Relay_Cloud_OnMqttLost();
+
+        /* 这里**故意不交还控制权**：15s 保底只是状态机内部自愈（自己重连，通常几秒就回来），
+           不算"云端下线"。原先在这儿调 OnMqttLost() 会让本地温度联动抢回控制权，
+           表现成"云端控过一次，过一会儿风扇又自己按温度开关了"。
+           真掉线（TCP CLOSED / WiFi 断 / 上报心跳发不出去）那条路照旧交还，fail-safe 不受影响 */
     }
 }
