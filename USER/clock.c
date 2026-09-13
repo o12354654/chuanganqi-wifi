@@ -141,8 +141,16 @@ uint8_t Clock_NetSyncDue(void)
     uint32_t now = Clock_Millis();
 
     if (!s_tried)  return 1;                              /* 上电第一次 */
-    if (s_synced)  return ((now - s_last_ok)  >= CLOCK_SYNC_PERIOD_MS) ? 1 : 0;
-    return ((now - s_last_try) >= CLOCK_SYNC_RETRY_MS) ? 1 : 0;
+
+    /* 退避先行：只判"距上次成功"的话，失败路径每一轮都满足条件 ——
+       SNTP 拿不到应答（超时或解析失败）时变成探测风暴，
+       而探测窗口内 MQTT 收发要让开，上报/心跳一起停摆，
+       60s 后 keepalive 到期被 broker 踢，表现成"WiFi 明明是好的却反复重连"。
+       所以不论成功失败，两次尝试之间至少隔 CLOCK_SYNC_RETRY_MS */
+    if ((now - s_last_try) < CLOCK_SYNC_RETRY_MS) return 0;
+
+    if (s_synced)  return ((now - s_last_ok) >= CLOCK_SYNC_PERIOD_MS) ? 1 : 0;
+    return 1;
 }
 
 void Clock_NetSyncTry(void)

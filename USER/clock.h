@@ -48,6 +48,6 @@ uint8_t     Clock_IsSynced(void);        /* 是否成功网络授时过 */
 uint8_t     Clock_NetSyncDue(void);      /* 现在需要授时吗 */
 void        Clock_NetSyncTry(void);      /* 记一次"开始尝试" */
 void        Clock_NetSyncOk(const DS1302_TIME *t);   /* 授时成功，时间生效 */
-void        Clock_NetSyncFail(void);     /* 授时失败，继续用 RTC */
+void        Clock_NetSyncFail(void);     /* 授时失败，继续用 RTC（并退避 CLOCK_SYNC_RETRY_MS 再试） */
 
 #endif

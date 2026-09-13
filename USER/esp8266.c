@@ -264,7 +264,13 @@ static void ESP8266_JsonId(const char *json, char *out, uint16_t max)
     if (!p) return;
     p++;
     while (*p == ' ' || *p == '\t' || *p == '\"') p++;
-    while (*p && *p != '\"' && n < (uint16_t)(max - 1)) out[n++] = *p++;
+    /* 结束条件要带上 , } 和空白：数字形式的 id（"id":1,）原先只在遇到引号时才停，
+       会把后面的逗号一起抠出来，回执的 id 跟请求对不上（平台显示"未正确应答"） */
+    while (*p && *p != '"' && *p != ',' && *p != '}' &&
+           *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' &&
+           n < (uint16_t)(max - 1)) {
+        out[n++] = *p++;
+    }
     out[n] = '\0';
 }
 
@@ -289,9 +295,11 @@ static void ESP8266_HandleDownlink(uint8_t *data, uint16_t len)
     uint16_t       n;
 
     if (len >= 4 && (data[0] & 0xF0) == MQTT_SUBACK) {
-        /* 第 4 字节是平台给的返回码：0x00 = 授予 QoS0，0x80 = 未授权/订阅失败。
-           原先只看报文类型就置 sub_ok，订阅被平台拒绝时会"永远订不上却看不出来" */
-        sub_ok = (uint8_t)(data[3] == 0x00);
+        /* SUBACK = 固定头(2) + 报文标识符(2) + 每个订阅项一个返回码，
+           返回码是**最后一个字节**：0x00/0x01/0x02 = 授予的 QoS，0x80 = 失败/未授权。
+           返修记录：这里原先判 data[3]，那是报文标识符的低字节 —— 平台正常回
+           90 03 00 01 00 时它等于 0x01，成功的订阅被当成失败，于是每 10s 无脑重订 */
+        sub_ok = (uint8_t)((len >= 5 && data[len - 1] != 0x80) ? 1 : 0);
         return;
     }
 
@@ -918,17 +926,25 @@ void ESP8266_Process(void)
             uint16_t ipd_len;
             uint8_t *ipd_data;
             if (ESP8266_ParseIPD(rx_buf, &ipd_len, &ipd_data)) {
-                uint8_t result = MQTT_ParseConnack(ipd_data, ipd_len);
-                if (result == 0) {
-                    printf("ESP8266: MQTT Online! (OneNET)\r\n");
-                    mqtt_online = 1;
-                    mqtt_timer  = 0;
-                    ESP8266_ClearRx();
-                    esp_state   = ESP_STATE_MQTT_ONLINE;
-                    ESP8266_SendSubscribe();   /* 订阅云端属性设置，等云端下发控制 */
-                } else {
-                    printf("ESP8266: CONNACK err=%d\r\n", result);
-                    esp_state = ESP_STATE_TCP_DISCONNECT;
+                uint16_t off = (uint16_t)(ipd_data - (uint8_t *)rx_buf);
+
+                /* 声明长度可能大于缓冲里实际到的字节（帧跨轮到达）：
+                   不截断就直接解析，MQTT_ParseConnack 会读到 rx_buf 之外；
+                   而半帧当场判失败又会白白重连一次。
+                   所以没到齐就等下一轮，由 state_timer 超时和 15s 保底兜底 */
+                if ((uint32_t)off + ipd_len <= (uint32_t)rx_len) {
+                    uint8_t result = MQTT_ParseConnack(ipd_data, ipd_len);
+                    if (result == 0) {
+                        printf("ESP8266: MQTT Online! (OneNET)\r\n");
+                        mqtt_online = 1;
+                        mqtt_timer  = 0;
+                        ESP8266_ClearRx();
+                        esp_state   = ESP_STATE_MQTT_ONLINE;
+                        ESP8266_SendSubscribe();   /* 订阅云端属性设置，等云端下发控制 */
+                    } else {
+                        printf("ESP8266: CONNACK err=%d\r\n", result);
+                        esp_state = ESP_STATE_TCP_DISCONNECT;
+                    }
                 }
             }
         } else if (ESP8266_RxHas("CLOSED") || ESP8266_RxHas("ERROR") ||
@@ -964,10 +980,14 @@ void ESP8266_Process(void)
                 ESP8266_ClearRx();
                 probe_on = 0;
             } else if (probe_timer >= TICK_SNTP_PROBE_WAIT) {
-                Clock_NetSyncFail();
+                Clock_NetSyncFail();    /* 无应答：记一次失败，退避 60s 后再试 */
                 probe_on = 0;
             }
-            break;                      /* 探测期间不做 MQTT 收发，避免互相打断 */
+            /* 探测窗口内不发 MQTT 报文：AT 正忙时 CIPSEND 会被拒，
+               紧接着就被当成掉线。代价是本轮 mqtt_timer 不推进，
+               所以窗口必须短（3s）且失败必须退避 —— 不退避就是探测风暴，
+               上报和心跳会被一直挤掉（见 clock.c 的 Clock_NetSyncDue） */
+            break;
         }
         if (sntp_supported && Clock_NetSyncDue()) {
             printf("ESP8266: SNTP recheck\r\n");
@@ -987,9 +1007,13 @@ void ESP8266_Process(void)
             ESP8266_SendSubscribe();
         }
 
-        /* 检测 TCP 断开 */
-        if (ESP8266_RxHas("CLOSED") || ESP8266_RxHas("ERROR")) {
-            printf("ESP8266: TCP lost (CLOSED/ERROR)\r\n");
+        /* 检测 TCP 断开：只认模块明确报的 TCP 关闭。
+           这里不能带 "ERROR" —— AT 层的 ERROR（上一条命令被拒、SNTP 不支持、
+           透传退出等）和真正的断链共用同一串关键字，拿它判掉线会误重连，
+           表现成"偶发上报中断"。真断链另有两道兜底：上报/心跳发不出去会重连、
+           15s 绝对超时保底 */
+        if (ESP8266_RxHas("CLOSED")) {
+            printf("ESP8266: TCP lost (CLOSED)\r\n");
             mqtt_online = 0;
             mqtt_timer  = 0;
             ESP8266_ClearRx();
@@ -1009,6 +1033,7 @@ void ESP8266_Process(void)
 
             pub_ok = ESP8266_TCPSend(tx_buf, pkt_len);
             if (pub_ok == 0) {
+                abs_ticks = 0;      /* 报文真发出去了 = 有进展，15s 保底重新计时 */
                 printf("MQTT PUB: temp=%d humi=%d\r\n", temp, humi);
             } else {
                 printf("MQTT PUB fail (%d), reconnecting\r\n", pub_ok);
@@ -1070,15 +1095,17 @@ void ESP8266_Process(void)
         break;
     }
 
-    /* 计时器：仅在无新数据时推进 */
+    /* 状态内超时：仅在无新数据时推进 */
     if (!new_data) {
         state_timer++;
     } else {
-        abs_ticks = 0;        /* 有新数据 = 有进展，保底计时清零 */
         state_timer = 0;
     }
 
-    /* 状态发生了变化也算有进展 */
+    /* 15s 保底只认"真进展"：状态发生变化，或 MQTT 在线时成功发出过报文。
+       不能拿"收到任意字节"当进展 —— 模块供电不足反复重启时会一直喷日志，
+       计时器每轮都被清零，于是既没有状态超时也没有保底，
+       状态机卡在 WAIT_AT / WAIT_CWJAP 里再也出不来 */
     if (esp_state != last_state) {
         last_state = esp_state;
         abs_ticks  = 0;
